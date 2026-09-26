@@ -29,6 +29,13 @@
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
 #   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
 #
+# M79k (#1720) adds run 06: the notify seam. GOFILES.ELF is the adopter (it
+# raises a toast on a completed copy, over the real WM_RPC kind-12 frame, to
+# a LIVE seat); the run proves the whole chain — the app's own ack, the
+# seat's queue line, a kind-4 snapshot of the toast ON the composed scanout
+# (exact-RGB, straight out of the guest), and a `--pointer-virtio` click on
+# the toast that dismisses it and focuses the sender.
+#
 # exec-order: assert-proven -- each run ends on a marker only its script prints
 # (`rx-gotabwm-ok`, `rx-gotabwm-np-ok`, `rx-gotabwm-chrome-ok`), and every stage
 # gate waits on guest output the program, the kernel and the hosted app produce
@@ -137,6 +144,31 @@ if not os.path.exists(src):
              "bash tools/go/build-note.sh")
 shutil.copy(src, os.path.join(share, "NOTE.ELF"))
 print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
+# M79k (#1720): run 06 hosts GOFILES.ELF as the NOTIFY adopter, so stage it
+# and the fixture its copy needs. HOST PREREQUISITE:
+#   bash tools/go/build-files.sh  ->  .build/go/GOFILES.ELF
+#
+# The fixture is one file plus one directory, and that is exactly what the
+# run's key batch needs: dirs sort first, so entry 0 is SUB and entry 1 is
+# SOURCE.TXT. See run 06's input note for the exact strokes.
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOFILES.ELF")
+if not os.path.exists(src):
+    sys.exit("GOFILES.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-files.sh")
+shutil.copy(src, os.path.join(share, "GOFILES.ELF"))
+notify = os.path.join(share, "NOTIFY")
+sub = os.path.join(notify, "SUB")
+os.makedirs(sub, exist_ok=True)
+with open(os.path.join(notify, "SOURCE.TXT"), "w") as f:
+    f.write("notify-adopter-payload\n")
+print("staged GOFILES.ELF (%d bytes) + NOTIFY/SOURCE.TXT + NOTIFY/SUB"
+      % os.path.getsize(os.path.join(share, "GOFILES.ELF")))
 PY
 
 # M71h (#1567): run 04 hosts the image viewer, so stage it and the QOI fixture
@@ -543,3 +575,277 @@ vgate_assert 05 serial-contains 'wm: unregistered, shim resumed'
 vgate_assert 05 serial-contains 'rx-gotabwm-live-ok'
 vgate_assert 05 serial-absent '[EXC] parking:'
 vgate_assert 05 serial-absent 'exited status=139'
+
+# --- M79k (#1720) run 06: the notify seam, end to end ---------------------
+#
+# GOFILES.ELF is the adopter: it raises a toast on a COMPLETED copy, over the
+# real WM_RPC wire, to a seat that is LIVE (the GOTABWM.DEMO trigger is
+# removed before the exec, the go-wm-seat run 05 pattern — in demo mode the
+# single-tab hostTicks countdown closes the app long before an 8-tick toast
+# could expire on its own).
+#
+# The chain this run proves has five links, each with its own marker,
+# because each can fail alone:
+#
+#   gofiles: pasted SOURCE.TXT         the copy really completed
+#   gofiles: notify sent <text>        the app's OWN ack — the seat
+#                                       answered, so this is not a request
+#                                       into the void
+#   gotabwm: notify id=<n> <text>      the seat queued it (printed AFTER
+#                                       the push, never before)
+#   gotabwm: notify paint id=<n>       the toast is ON THE SCANOUT and
+#                                       the frame was PRESENTED
+#   gotabwm: notify dismiss id=<n>     the click took it away, and the
+#                                       focus landed on the sender
+#
+# The pixel probe is a kind-4 snapshot fired on `notify paint`, not a host
+# framebuffer grab: the guest streams its own composed scanout, so the
+# pixels ARE the seat's, and the trigger marker is printed after the
+# present — a grab keyed on `gotabwm: notify id=` would read a frame the
+# seat had not flushed yet (the go-wm-seat run 03 note).
+#
+# The input is `--input-string $'jck\np'`, NOT `--input-chords`, and the
+# difference is load-bearing. GOFILES is a tty app: it reads bytes from its
+# bound /dev/tty and decodes them with keys.Decode. An ARROW arrives as a
+# single HID usage (0x51/0x52) that the kernel expands into the three tty
+# bytes ESC [ B — and over the cv-input transport (0.25 s per stroke) that
+# expansion is not atomic: the ESC is delivered and decoded on its own, so
+# `keys.Decode` returns KeyEsc and the app runs goUp() instead of moving the
+# selection. That is exactly what the first attempt at this run did — the
+# app climbed to /host, opened APPS.TXT, and pasted into the share root
+# (observed 2026-09-26: `gofiles: cd /host`, `gofiles: view APPS.TXT`,
+# `gofiles: paste refused APPS.TXT exists`, and no toast at all). The vi keys
+# j/k do the same move WITHOUT a CSI sequence — one printable byte, decoded
+# as a rune — so the whole batch is five printable bytes and one Enter:
+#
+#   j  move down one entry      0 -> 1  (SOURCE.TXT)
+#   c  yank a COPY of it        `gofiles: clip copy SOURCE.TXT`
+#   k  move up one entry        1 -> 0  (SUB)
+#  \n  open the selection       `gofiles: cd /host/NOTIFY/SUB`
+#   p  paste                    `gofiles: pasted SOURCE.TXT` + the toast
+#
+# The click is a `--pointer-virtio` press+release at the toast's centre,
+# (112, 702) = the middle of notifyRect(1280,720,0) = (8, 692, 208, 20). It
+# is scheduled on the PAINT marker, not on the request marker, so the toast
+# is provably on the scanout when the pointer arrives. The seat's tick is
+# ~1 s, NotifyTicks is 8, and the pointer transport paces 2.5 s per
+# message, so the down edge lands well inside the lifetime.
+#
+# exec-order: assert-proven -- the run ends on `rx-gotabwm-notify-ok`, which
+# only script3 prints, and script3 is held behind `gotabwm: notify dismiss`,
+# a marker only the seat's click path can print.
+vgate_file script-06.txt <<'EOF'
+vf rm GOTABWM.DEMO
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-06.txt <<'EOF'
+dui focus 0
+exec GOFILES.ELF /host/NOTIFY
+EOF
+
+vgate_file script3-06.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-notify-ok
+EOF
+
+vgate_run 06 -- \
+    --screen '$RUN_DIR/screen-06' \
+    --via-virtio --cvc-snap \
+    --snapshot-after 'gotabwm: notify paint id=' \
+    --snapshot-out '$RUN_DIR/snap-06' \
+    --script '$RUN_DIR/script-06.txt' \
+    --script2 '$RUN_DIR/script2-06.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --input-string $'jck\np' \
+    --input-string-after 'gofiles: ready' \
+    --pointer-virtio '112,702,d;112,702,u' \
+    --pointer-virtio-after 'gotabwm: notify paint id=' \
+    --script3 '$RUN_DIR/script3-06.txt' \
+    --script3-after 'gotabwm: notify dismiss id=' \
+    --script-expect 'rx-gotabwm-notify-ok' --timeout 360
+
+vgate_assert 06 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 06 serial-contains 'gotabwm: mode live'
+vgate_assert 06 serial-absent 'gotabwm: mode demo'
+vgate_assert 06 serial-contains 'exec: loaded GOFILES.ELF'
+vgate_assert 06 serial-contains 'gofiles: declare accepted'
+# The adopter's half: the copy completed and the notify was ACCEPTED. The
+# refused marker is the control — a seat that never answered would print
+# `notify refused` and the chain below would be absent.
+vgate_assert 06 serial-contains 'gofiles: cd /host/NOTIFY/SUB'
+vgate_assert 06 serial-contains 'gofiles: pasted SOURCE.TXT'
+vgate_assert 06 serial-contains 'gofiles: notify sent copied SOURCE.TXT'
+vgate_assert 06 serial-absent 'gofiles: notify refused'
+# The seat's half: kind 12 was applied, the toast reached the scanout, and
+# the click dismissed it.
+vgate_assert 06 serial-contains 'gotabwm: notify id='
+vgate_assert 06 serial-contains 'copied SOURCE.TXT'
+vgate_assert 06 serial-contains 'gotabwm: notify paint id='
+vgate_assert 06 serial-contains 'gotabwm: notify dismiss id='
+# Click-to-focus is the whole point of a toast raised by another tab, so the
+# focus must be visible in the log: the same `tab focus` / `host focus` pair
+# alt-tab and a rail click print.
+vgate_assert 06 serial-contains 'gotabwm: tab focus id='
+vgate_assert 06 serial-contains 'gotabwm: host focus id='
+vgate_assert 06 serial-contains 'rx-gotabwm-notify-ok'
+vgate_assert 06 serial-absent '[EXC] parking:'
+vgate_assert 06 serial-absent 'exited status=139'
+
+# The chain as an ORDERING check, because each of these markers can appear
+# without any of the others. Only the CAUSAL orders are asserted: the paste
+# that caused the toast, the seat's queue line before the app's ack (the ack
+# is the ANSWER to that request, so the app cannot claim the user was told
+# before the seat had queued anything), the queue line before the paint (the
+# paint marker is printed after the push), and the paint before the dismiss
+# (run 06's click is anchored on the paint marker, so the toast was on screen
+# before anything dismissed it). One sender id throughout: the toast belongs
+# to the tab that raised it.
+#
+# `sent` and `painted` are deliberately NOT ordered against each other. Both
+# are downstream of `queued` with nothing causal in between: the seat prints
+# `queued` while servicing the request and paints on the next presented tick,
+# while the app prints `sent` when the ack makes the mailbox round trip back.
+# Which lands first is a scheduling race. An earlier version of this hook
+# asserted sent < painted and failed on a rebuild that changed nothing about
+# the chain (observed 2026-09-26: sent=25056 painted=25015) — asserting a
+# race is asserting a flake.
+vgate_assert 06 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+
+def at(pat, what):
+    m = re.search(pat, ser)
+    if not m:
+        sys.exit("no %s in the serial log" % what)
+    return m
+
+pasted = at(r"(?m)^gofiles: pasted SOURCE\.TXT$", "the app's completed copy")
+queued = at(r"(?m)^gotabwm: notify id=(\d+) copied SOURCE\.TXT$", "the seat's queue line")
+sent = at(r"(?m)^gofiles: notify sent copied SOURCE\.TXT$", "the app's accepted ack")
+painted = at(r"(?m)^gotabwm: notify paint id=(\d+)$", "the seat's paint marker")
+dismissed = at(r"(?m)^gotabwm: notify dismiss id=(\d+)$", "the click's dismiss marker")
+# queued BEFORE sent, not after: the seat prints its line while it services
+# the request, and the app's ack can only print once that answer has made
+# the mailbox round trip back. Getting this backwards would mean the app
+# claimed the user was told before the seat had queued anything.
+if not (pasted.start() < queued.start() < sent.start()
+        and queued.start() < painted.start() < dismissed.start()):
+    sys.exit("notify chain out of order: paste=%d queued=%d sent=%d painted=%d dismissed=%d"
+             % (pasted.start(), queued.start(), sent.start(), painted.start(), dismissed.start()))
+
+wid = queued.group(1)
+for name, m in (("paint", painted), ("dismiss", dismissed)):
+    if m.group(1) != wid:
+        sys.exit("the %s marker names id=%s, want the sender id=%s" % (name, m.group(1), wid))
+
+# The message the app printed is byte-for-byte the message the seat queued
+# (the `queued` regex above anchors on the full line, so any truncation by
+# the 24-byte title budget would have failed to match). "copied SOURCE.TXT"
+# is 17 bytes, so nothing was cut.
+if len("copied SOURCE.TXT") > 24:
+    sys.exit("the adopter's message exceeds the 24-byte title budget")
+
+# The dismiss is the CLICK's, not the NotifyTicks expiry's, and this is the
+# one check that tells them apart. Both print the same line — one marker, two
+# causes — but only the click path focuses the sender, so the focus pair must
+# be the two lines IMMEDIATELY after the dismiss. Searching for the pair on
+# its own would not do it: the DECLARE already printed `tab focus id=` for
+# this window, so the first occurrence is long before the toast. An expiry
+# that fired instead of the click would leave the pair absent here.
+lines = ser.split("\n")
+hits = [k for k, l in enumerate(lines) if l == "gotabwm: notify dismiss id=" + wid]
+if not hits:
+    sys.exit("no dismiss line for id=%s" % wid)
+i = hits[0]
+if lines[i + 1] != "gotabwm: tab focus id=" + wid or lines[i + 2] != "gotabwm: host focus id=" + wid:
+    sys.exit("the dismiss at line %d is not the click's: followed by %r / %r, want the focus pair"
+             % (i, lines[i + 1][:44], lines[i + 2][:44]))
+print("M79k notify chain OK: paste -> seat queue (id=%s) + app ack + paint -> CLICK dismiss -> focus"
+      % wid)
+PY
+
+# THE pixel assert: the toast on the scanout, read out of the guest's own
+# composed frame. The panel is notifyRect(1280,720,0,1) = (8, 692, 208, 20): a
+# 2px accent rule down the left edge, the 8x8 face text, and Surface between
+# them. Tokens are the dark palette's Accent 0x3b82f6, Surface 0x222d35, Ink
+# 0xe6edf3. The snapshot is raw BGRX at the scanout's own resolution.
+vgate_assert 06 snapshot 'snap-06-*.raw' <<'PY'
+import sys
+from collections import Counter
+
+W, H = 1280, 720
+raw = open(sys.argv[1], "rb").read()
+need = W * H * 4
+if len(raw) < need:
+    sys.exit("snapshot is %d bytes, want at least %d (%dx%d BGRX)" % (len(raw), need, W, H))
+
+def px(x, y):
+    off = (y * W + x) * 4
+    b, g, r = raw[off], raw[off + 1], raw[off + 2]
+    return (r, g, b)
+
+# The toast rect, and the seat chrome it must NOT have eaten: the 22px top
+# rail, and the bottom-right clock panel chromeRect(1280,720) = (1124, 692).
+TX, TY, TW, TH = 8, 692, 208, 20
+CX, CY, CW, CH = 1124, 692, 148, 20
+if TX + TW > CX:
+    sys.exit("the toast rect and the clock panel overlap; the layout pin is wrong")
+if TY < 22:
+    sys.exit("the toast rect starts inside the 22px rail; the layout pin is wrong")
+
+ACCENT = (0x3b, 0x82, 0xf6)
+SURFACE = (0x22, 0x2d, 0x35)
+INK = (0xe6, 0xed, 0xf3)
+CHROME_BG = (0x11, 0x17, 0x1c)
+
+modal = Counter()
+rule = ink = surface = 0
+for y in range(TY, TY + TH):
+    for x in range(TX, TX + TW):
+        c = px(x, y)
+        modal[c] += 1
+        if x < TX + 2:
+            if c == ACCENT:
+                rule += 1
+        elif c == INK:
+            ink += 1
+        elif c == SURFACE:
+            surface += 1
+
+best, n = modal.most_common(1)[0]
+print("toast rect (%d,%d %dx%d): modal=#%02x%02x%02x n=%d distinct=%d "
+      "rule=%d ink=%d surface=%d"
+      % (TX, TY, TW, TH, best[0], best[1], best[2], n, len(modal), rule, ink, surface))
+
+# The accent rule: the panel's full-height 2px left edge, 2 x TH pixels.
+assert rule == 2 * TH, ("only %d/%d accent-rule pixels at the toast's left edge - "
+                        "the seat did not paint the toast" % (rule, 2 * TH))
+# The face painted, in ink, inside the panel and clear of the rule.
+assert ink >= 20, ("only %d ink pixels in the toast rect - the message text did not paint" % ink)
+# And the panel is Surface, NOT the blank desktop Bg (0x182026): a toast that
+# blended into the background would be invisible and still "painted".
+assert best == SURFACE, ("the toast rect's modal colour is #%02x%02x%02x, want the "
+                         "Surface token #%02x%02x%02x - the panel is not a toast"
+                         % (best + SURFACE))
+assert surface >= n // 2, ("only %d of %d modal pixels read Surface" % (surface, n))
+
+# The clock panel is still ITS OWN chrome: the toast did not overpaint it.
+clock = Counter(px(x, y) for y in range(CY, CY + CH) for x in range(CX, CX + CW))
+cbest, cn = clock.most_common(1)[0]
+assert cbest == CHROME_BG, ("the clock panel reads #%02x%02x%02x, want the ChromeBg "
+                            "token #%02x%02x%02x - the toast overpainted it"
+                            % (cbest + CHROME_BG))
+
+# The RAIL is deliberately NOT probed for colour here: the rail paints the
+# Accent token itself (a focused cell's underline), so an accent count in the
+# top 22 rows measures the rail, not the toast. What the layout pin at the
+# top of this hook already proves is the real claim: the toast rect starts
+# below the 22px rail and ends before the clock panel, so nothing it paints
+# can land on either.
+print("toast: rule=%d ink=%d surface=%d; clock panel intact at #%02x%02x%02x (n=%d)"
+      % (rule, ink, surface, cbest[0], cbest[1], cbest[2], cn))
+PY

@@ -39,6 +39,13 @@ const (
 	markerClip     = "gofiles: clip "
 	markerPasted   = "gofiles: pasted "
 	markerPasteNo  = "gofiles: paste refused "
+	// M79k (#1720): this app is the notify adopter. The seat owns the
+	// toast; the app's own half is the round trip. `notify sent` follows
+	// an accepted ack, `notify refused` an absent seat or a refused
+	// request — the same declare accepted/refused pair this app already
+	// uses, because a silent failure is a lie either way.
+	markerNotify   = "gofiles: notify sent "
+	markerNotifyNo = "gofiles: notify refused "
 
 	// markerSettled is printed one yield after the rename frame has been
 	// painted and its `gofiles: renamed …` marker flushed: the gate's close

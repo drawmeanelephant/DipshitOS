@@ -10,6 +10,8 @@
 //	seat held, awaiting ticks       -> gotabwm: holding seat
 //	COMPOSITE_TICK (kind 18)        -> gotabwm: tick
 //	paint the clock/status chrome   -> gotabwm: clock-source / gotabwm: clock
+//	paint the notify strip (M79k)   -> gotabwm: notify paint id=<n> (once)
+//	                                then gotabwm: notify dismiss id=<n> (expiry or click)
 //	WM_POINTER (kind 19)            -> gotabwm: ptr
 //	WM_KEY (kind 21)                -> gotabwm: key
 //	vi.WmctlRequestPresent (65/3)   -> gotabwm: present
@@ -321,11 +323,20 @@ func sweepHosted(close func() bool) {
 	}
 }
 
+// seatTick is the composite tick count the last paint pass ran at, in the
+// same units compositeTick's `ticks`. The main loop keeps its own counter as
+// a local; this is the package-visible copy the WM_RPC arms need, because
+// applyRPC runs between ticks (serviceRPC is called before the event poll)
+// and a toast born "now" has to know which tick now is. Set only by
+// compositeTick, so it always names a tick that actually painted.
+var seatTick uint64
+
 // compositeTick performs one bounded compositor pass after a COMPOSITE_TICK
 // event. Keeping it separate lets the event drain preserve each tick's paint,
 // present, and host-lifecycle ordering while still consuming a complete input
 // burst in one queue pass.
 func compositeTick(scan []byte, ticks uint64, presents *int) {
+	seatTick = ticks
 	vi.ConsoleLine(MarkerTick)
 	if tabs.Count() == 0 {
 		_ = paintBlank(scan, blankRGB())
@@ -338,11 +349,28 @@ func compositeTick(scan []byte, ticks uint64, presents *int) {
 	if launch.open {
 		_ = paintLauncher(scan, vi.ScanoutWidth, vi.ScanoutHeight)
 	}
-	if vi.WmctlRequestPresent() == 0 {
+	// M79k (#1720): the notify strip is the LAST thing painted before the
+	// present, so it sits above the launcher and above the clock panel. A
+	// notification fired by the app the user just launched must not be
+	// hidden by the launcher they are still typing into — that is the whole
+	// reason a toast exists. Expiry runs first so a toast that has run out
+	// is never painted for one more frame, and so the dismiss marker lands
+	// in the same tick the pixels stop changing.
+	notifyTick(ticks)
+	painted := paintNotify(scan, vi.ScanoutWidth, vi.ScanoutHeight, ticks)
+	presented := vi.WmctlRequestPresent() == 0
+	if presented {
 		*presents++
 		if *presents == 1 {
 			vi.ConsoleLine(MarkerPresent)
 		}
+	}
+	// The paint marker follows the PRESENT, not the fill: "the toast is on
+	// the scanout" is only true once the frame carrying it has been
+	// flushed. A gate that keyed a pixel probe on `gotabwm: notify id=`
+	// would be reading a frame the seat had not presented yet.
+	if line, once := notifyPaintMarker(painted > 0 && presented); once {
+		vi.ConsoleLine(line)
 	}
 	if stripDone || !demoMode {
 		// M79a (#1704): the auto-reorder/pin/split/close chain and the

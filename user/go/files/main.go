@@ -59,10 +59,23 @@ func paint(fd uint32, m model) bool {
 	return rc >= 0 && n == len(data)
 }
 
-// flush prints the model's queued serial markers in order.
-func flush(m *model) {
+// flush prints the model's queued serial markers in order, then raises the
+// toast the model queued for this frame (M79k #1720). The notify rides the
+// SAME post-paint barrier as the markers: a toast that names a completed
+// copy must not appear before the listing that shows the copy, and the
+// seat's own `gotabwm: notify id=` line must not land before the app's
+// `gofiles: pasted …` line it is about. The ack is printed either way, so
+// "the seat never heard about it" is a distinguishable outcome.
+func flush(m *model, ta *tabapp.TabApp) {
 	for _, ln := range m.drain() {
 		vi.ConsoleLine(ln)
+	}
+	if text := m.takeNotify(); text != "" {
+		if ta.Notify(text) {
+			vi.ConsoleLine(markerNotify + text)
+		} else {
+			vi.ConsoleLine(markerNotifyNo + text)
+		}
 	}
 }
 
@@ -117,7 +130,7 @@ func main() {
 	}
 	vi.Sleep(2)
 	vi.ConsoleLine(markerPainted)
-	flush(&m)
+	flush(&m, ta)
 	vi.ConsoleLine(markerPresent)
 	// M79e (#1708): announce where this tab starts. Without a first
 	// declare the seat has no history and a back-step has nowhere to go.
@@ -134,7 +147,7 @@ func main() {
 		// the queue is empty).
 		n, _ := vi.FileRead(fd, in[:])
 		if n > 0 {
-			if !feed(&m, fd, in[:n]) {
+			if !feed(&m, fd, in[:n], ta) {
 				if m.quit {
 					shutdown(ta, fd, 0)
 				}
@@ -165,7 +178,7 @@ func main() {
 					shutdown(ta, fd, 4)
 				}
 				vi.Sleep(2)
-				flush(&m)
+				flush(&m, ta)
 				vi.ConsoleLine(markerResized + vi.Itoa64(int64(cols)) +
 					" h=" + vi.Itoa64(int64(rows)))
 				vi.ConsoleLine(markerRepaint)
@@ -194,7 +207,7 @@ func main() {
 				if !paint(fd, m) {
 					shutdown(ta, fd, 4)
 				}
-				flush(&m)
+				flush(&m, ta)
 				vi.ConsoleLine(markerNavBack + p)
 			}
 			vi.Sleep(1)
@@ -226,8 +239,9 @@ var mouseTail []byte
 
 // feed consumes one read chunk of tty bytes: SGR mouse reports are split
 // off first (ESC [ < … M|m), the rest decodes to key events. It returns
-// false when the caller must shut down (m.quit, or a paint failure).
-func feed(m *model, fd uint32, chunk []byte) bool {
+// false when the caller must shut down (m.quit, or a paint failure). `ta`
+// is the tab handle the M79k notify rides out on, threaded to onKey/onMouse.
+func feed(m *model, fd uint32, chunk []byte, ta *tabapp.TabApp) bool {
 	var kbuf []byte
 	if len(mouseTail) > 0 {
 		kbuf = append(mouseTail, chunk...)
@@ -259,7 +273,7 @@ func feed(m *model, fd uint32, chunk []byte) bool {
 			if !ok {
 				continue
 			}
-			if !onMouse(m, fd, b, x, y) {
+			if !onMouse(m, fd, b, x, y, ta) {
 				return false
 			}
 			continue
@@ -272,7 +286,7 @@ func feed(m *model, fd uint32, chunk []byte) bool {
 		if ev.Key == keys.KeyNone {
 			continue
 		}
-		if !onKey(m, fd, ev) {
+		if !onKey(m, fd, ev, ta) {
 			return false
 		}
 	}
@@ -280,8 +294,10 @@ func feed(m *model, fd uint32, chunk []byte) bool {
 }
 
 // onKey runs one key through the model, then paints and flushes: markers
-// for this key land only after its frame exists.
-func onKey(m *model, fd uint32, ev keys.Event) bool {
+// for this key land only after its frame exists. `ta` is the tab handle the
+// M79k notify rides out on — a paste is a key, so this is the path a toast
+// actually takes.
+func onKey(m *model, fd uint32, ev keys.Event, ta *tabapp.TabApp) bool {
 	// Update has a VALUE receiver (the tea.Model contract): the returned
 	// model IS the state — discarding it makes every key a no-op (observed
 	// on the first gate run: `key return` printed, nothing navigated).
@@ -296,7 +312,7 @@ func onKey(m *model, fd uint32, ev keys.Event) bool {
 		return false
 	}
 	vi.Sleep(1)
-	flush(m)
+	flush(m, ta)
 	vi.ConsoleLine(markerKey + keyLabel(ev))
 	vi.ConsoleLine(markerRepaint)
 	settle(m)
@@ -304,8 +320,9 @@ func onKey(m *model, fd uint32, ev keys.Event) bool {
 }
 
 // onMouse handles one SGR report: releases only get their marker (charmhello
-// precedent), a left press goes through the model as a cell click.
-func onMouse(m *model, fd uint32, b, x, y int) bool {
+// precedent), a left press goes through the model as a cell click. `ta` is
+// the tab handle the M79k notify rides out on, same as onKey.
+func onMouse(m *model, fd uint32, b, x, y int, ta *tabapp.TabApp) bool {
 	pressed := b&32 == 0 && b&3 == 0 // left button, press edge
 	if pressed {
 		next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
@@ -319,7 +336,7 @@ func onMouse(m *model, fd uint32, b, x, y int) bool {
 			return false
 		}
 		vi.Sleep(1)
-		flush(m)
+		flush(m, ta)
 		vi.ConsoleLine(markerRepaint)
 	}
 	vi.ConsoleLine(markerMouse + vi.Itoa64(int64(b)) +

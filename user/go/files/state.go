@@ -49,6 +49,10 @@ type model struct {
 	quit         bool
 	renamedBatch bool     // a rename landed this batch: main prints the settle marker
 	pending      []string // serial markers, flushed by main AFTER the frame paints
+	// notify is the M79k (#1720) toast this batch wants raised, drained by
+	// main alongside `pending`. The model stays pure: it decides WHAT
+	// happened, main owns the one seam that talks to the seat.
+	notify string
 }
 
 // newModel starts at path on a cols x rows grid and takes the first listing
@@ -67,6 +71,19 @@ func (m *model) drain() []string {
 	out := m.pending
 	m.pending = nil
 	return out
+}
+
+// notifyToast queues the toast text for main to raise after this frame
+// paints. The last one in a batch wins: the status line already names the
+// final state, and a screen that raises three toasts for one keystroke
+// would be lying about how much happened.
+func (m *model) notifyToast(text string) { m.notify = text }
+
+// takeNotify consumes the queued toast (consume-on-use, like drain).
+func (m *model) takeNotify() string {
+	t := m.notify
+	m.notify = ""
+	return t
 }
 
 // setSize adopts a new grid after a window resize (M73j #1636 has not
@@ -486,6 +503,7 @@ func (m *model) pasteClip() {
 		}
 		m.emit(markerPasted + name)
 		m.status = "moved " + name
+		m.notifyToast("moved " + name)
 		m.clip = ""
 		m.refresh()
 		m.status = "moved " + name
@@ -510,6 +528,7 @@ func (m *model) pasteClip() {
 	}
 	m.emit(markerPasted + name)
 	m.status = "copied " + name
+	m.notifyToast("copied " + name)
 	m.refresh()
 	m.status = "copied " + name
 }

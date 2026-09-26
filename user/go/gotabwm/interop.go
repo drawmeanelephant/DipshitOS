@@ -20,6 +20,8 @@
 //	detach (6)                  gotabwm: rpc detach id=<n>
 //	cycle (7)                   gotabwm: tab focus id=<n>; rpc cycle
 //	set title (11)              gotabwm: title id=<n> <text>
+//	notify (12)                 gotabwm: notify id=<n> <text>
+//	                            gotabwm: notify dismiss id=<n> (on expiry or click)
 //	anything else               gotabwm: rpc other kind=<n>
 //	rail after paint            gotabwm: rail n=<n> focus=<id>
 //	close focused / last        gotabwm: host close / tab close id=<n>
@@ -288,6 +290,30 @@ func applyRPC(req vi.WmRpc) bool {
 		// restores. Bin is untouched — SetTitle never re-guesses it, so
 		// reopen identity survives a rename.
 		noteSessionMutation()
+		return true
+	case vi.WmRpcKindNotify: // 12, client -> seat: say something to the user
+		// M79k (#1720). The request id is the SENDER, so the toast's
+		// click-through has a tab to focus without a second lookup, and
+		// the title is the whole message budget (24 NUL-trimmed bytes).
+		//
+		// An unknown sender or an empty message is REFUSED (applied=0,
+		// no marker): a toast that cannot be clicked back to anything is
+		// noise, and the client learns the truth from its own ack instead
+		// of the user learning it from a toast that does nothing.
+		text := req.TitleString()
+		if text == "" || tabs.index(id) < 0 {
+			return false
+		}
+		text, _, dropped := notifyPush(id, text, seatTick)
+		// The drop marker comes FIRST: the older toast has already left
+		// the queue, and a stream that silently lost one must say so
+		// before it announces the one it kept.
+		if dropped {
+			vi.ConsoleLine(MarkerNotifyDrop + vi.Itoa64(int64(notifyDropped)))
+		}
+		// Printed after the push, so the marker can never claim a toast
+		// the queue does not hold. The next composite tick paints it.
+		vi.ConsoleLine(MarkerNotify + vi.Itoa64(int64(id)) + " " + text)
 		return true
 	default:
 		vi.ConsoleLine(MarkerRpcOther + vi.Itoa64(int64(req.Kind&0x7f)))
