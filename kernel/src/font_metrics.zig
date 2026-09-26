@@ -105,9 +105,14 @@ pub var first_cp: u32 = data.medium.first_cp;
 pub var last_cp: u32 = data.medium.last_cp;
 pub var blob: [*]const u8 = data.medium.blob;
 
-/// Move the zoom ladder to `s`. The flat metrics follow atomically
-/// (one struct read, then the writes), so a painter in flight never
-/// mixes two sizes. The caller owns the re-flow: the next
+/// Move the zoom ladder to `s`. The flat metrics follow in one
+/// straight-line pass (one struct read, then the writes) — CONVENTION,
+/// not a guarantee: a cooperative kernel runs set_size to completion
+/// between paints so no painter sees a half-moved ladder, but the flats
+/// are `pub var` and nothing enforces set_size as their only writer. A
+/// future direct write to the flats would desync them from `size`
+/// (active()) silently — write through set_size. The caller owns
+/// the re-flow: the next
 /// `terminal.syncWindowCols` re-wraps the grid at the new cell (see
 /// driving_award.apply_grid_font_size, which also tells the bound TUIs).
 pub fn set_size(s: Size) void {

@@ -7054,14 +7054,27 @@ fn cmd_font(m: *Monitor, args: []const []const u8) ExecError {
         print_usage(m, lookup("font").?);
         return .usage;
     }
-    // The store's font_size apply chain moves BOTH ladders atomically
-    // (settings.set -> apply_font_size -> text + driving_award grid), and
+    // The store's font_size apply chain moves BOTH ladders in one pass
+    // (settings.set -> apply_font_size -> text + driving_award grid; the
+    // flats' single writer is set_size BY CONVENTION — see its note) and
     // publishes the row before the grid's WIN_RESIZE goes out (M80i).
-    // On a full table NOTHING moves — the ladders never disagree.
+    // When the store refuses the row, NOTHING moves — the ladders never
+    // disagree.
     const res = settings.set("font_size", @tagName(target.?));
     if (res != .ok) {
+        // Report the store's actual reason — table_full is the only one
+        // this call site can reach today (the key and value lengths are
+        // bounded by the table above), but SetResult has three failures
+        // and the message must not assume which one arrived.
         err_prefix(m);
-        m.console.puts("settings table full: font_size not set\n");
+        m.console.puts("font_size not set: ");
+        m.console.puts(switch (res) {
+            .table_full => "settings table full",
+            .invalid_key => "invalid key",
+            .invalid_value => "value too long",
+            .ok => "not set",
+        });
+        m.console.puts("\n");
         return .invalid_argument;
     }
     // Repaint through the compositor when the gpu is up.

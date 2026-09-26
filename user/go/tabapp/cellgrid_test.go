@@ -105,32 +105,61 @@ func TestTerminalCellForSizePinsKernelAtlas(t *testing.T) {
 // TestTerminalCellForSettingsMapsTheStore (M80i #1725): the value-level
 // mirror — the kernel's apply_font_size vocabulary (the names and their
 // M20 aliases) onto the same three cells; a later row wins (kernel
-// set_internal semantics); an absent or unrecognized value keeps the boot
-// look (the grid's compiled default rung, MEDIUM 8x16).
+// set_internal semantics); an absent or unrecognized value applies
+// NOTHING (settings.zig), so the mirror keeps the rung in force (the boot
+// look, MEDIUM 8x16, before the first valid row). Every case runs after
+// the same MEDIUM setup so the mirror's per-process state cannot order
+// the table.
 func TestTerminalCellForSettingsMapsTheStore(t *testing.T) {
 	cases := []struct {
 		body string
 		w, h uint32
 	}{
-		{"#v2\n", 8, 16},                                     // absent: the boot look
-		{"#v2\nfont_size=small\n", 7, 13},                    // the rung names
+		{"#v2\n", 8, 16},                  // absent: the boot look
+		{"#v2\nfont_size=small\n", 7, 13}, // the rung names
 		{"#v2\nfont_size=medium\n", 8, 16},
 		{"#v2\nfont_size=large\n", 10, 21},
-		{"#v2\nfont_size=small\nfont_size=large\n", 10, 21},  // a later row wins
-		{"#v2\nfont_size=0\n", 7, 13},                        // the M20 aliases
+		{"#v2\nfont_size=small\nfont_size=large\n", 10, 21}, // a later row wins
+		{"#v2\nfont_size=0\n", 7, 13},                       // the M20 aliases
 		{"#v2\nfont_size=8x8\n", 7, 13},
 		{"#v2\nfont_size=1\n", 8, 16},
 		{"#v2\nfont_size=16x16\n", 8, 16},
 		{"#v2\nfont_size=2\n", 10, 21},
 		{"#v2\nfont_size=24x24\n", 10, 21},
-		{"#v2\nfont_size=bogus\n", 8, 16},                    // the kernel ignores it
-		{"#v2\n font_size = large \n", 10, 21},               // parse_line trims
-		{"#v2\n#comment=1\nfont_size=large\n", 10, 21},       // other rows skipped
+		{"#v2\nfont_size=bogus\n", 8, 16},              // the kernel ignores it
+		{"#v2\n font_size = large \n", 10, 21},         // parse_line trims
+		{"#v2\n#comment=1\nfont_size=large\n", 10, 21}, // other rows skipped
 	}
 	for _, c := range cases {
+		vi.TerminalCellForSettings([]byte("font_size=medium\n")) // establish the rung in force
 		gotW, gotH := vi.TerminalCellForSettings([]byte(c.body))
 		if gotW != c.w || gotH != c.h {
 			t.Errorf("TerminalCellForSettings(%q) = %dx%d, want %dx%d", c.body, gotW, gotH, c.w, c.h)
 		}
+	}
+}
+
+// TestTerminalCellForSettingsAppliesNothing (M80i #1791 review footnote
+// 1): the kernel's apply_font_size maps an absent or unrecognized value
+// to NOTHING applied — both ladders keep what they had (settings.zig) —
+// and the mirror must follow. Before this pinned, a stored garbage row
+// fell back to 8x16 while the kernel grid kept, say, 10x21: the app then
+// derived a medium grid against a large one on the next plain WIN_RESIZE.
+func TestTerminalCellForSettingsAppliesNothing(t *testing.T) {
+	vi.TerminalCellForSettings([]byte("font_size=large\n"))
+	for _, body := range []string{
+		"#v2\nfont_size=bogus\n", // garbage: applies nothing
+		"#v2\n",                  // absent: applies nothing
+		"#v2\nfont_size=\n",      // empty value: applies nothing
+	} {
+		gotW, gotH := vi.TerminalCellForSettings([]byte(body))
+		if gotW != 10 || gotH != 21 {
+			t.Errorf("TerminalCellForSettings(%q) after large = %dx%d, want 10x21 (applies nothing)", body, gotW, gotH)
+		}
+	}
+	vi.TerminalCellForSettings([]byte("font_size=small\n"))
+	gotW, gotH := vi.TerminalCellForSettings([]byte("#v2\nfont_size=bogus\n"))
+	if gotW != 7 || gotH != 13 {
+		t.Errorf("after small, garbage = %dx%d, want 7x13 (applies nothing)", gotW, gotH)
 	}
 }

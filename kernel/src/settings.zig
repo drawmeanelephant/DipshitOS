@@ -501,8 +501,10 @@ fn apply_focus_follows_mouse(val: []const u8) void {
 /// two ladders — the vocabulary collision the card documents. The grid
 /// half runs through driving_award.apply_grid_font_size, which moves the
 /// cell, re-flows every bound grid and tells each bound TUI (WIN_RESIZE)
-/// before the caller's repaint. An unrecognized value applies NOTHING
-/// (both consumers keep what they had).
+/// before the caller's paints. An unrecognized value applies NOTHING
+/// (both consumers keep what they had — the Go mirror's sticky
+/// derivation in user/go/vi/gridcell.go follows the same contract, so a
+/// row the kernel cannot apply never disagrees with the app's cells).
 fn apply_font_size(val: []const u8) void {
     const size: ?text.FontSize = if (std.mem.eql(u8, val, "small") or std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "8x8"))
         .small

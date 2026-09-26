@@ -12,9 +12,12 @@ package vi
 //
 // The table mirrors kernel/src/font_atlas_data.zig's three rasterized
 // FiraCode cells (11/13/17 px): small 7x13, medium 8x16, large 10x21.
-// An absent or unrecognized `font_size` keeps the boot look: the grid's
-// compiled default rung is MEDIUM (8x16) even though the text layer's
-// default is small — the one-key/two-ladders wart the card documents.
+// At BOOT an absent or unrecognized `font_size` row keeps the boot look:
+// the grid's compiled default rung is MEDIUM (8x16) even though the text
+// layer's default is small — the one-key/two-ladders wart the card
+// documents. At RUNTIME such a row applies NOTHING (kernel
+// apply_font_size keeps both ladders), so the derivation keeps the last
+// VALID cell too — the store row and the grid never disagree.
 // Pinned against the kernel fixture by
 // TestTerminalCellForSizePinsKernelAtlas (user/go/tabapp/cellgrid_test.go).
 
@@ -26,8 +29,9 @@ const settingsMax = 2048
 
 // TerminalCell is the grid cell the rung IN FORCE maps to: the last
 // `font_size` row of /host/SETTINGS.TXT (kernel set_internal semantics —
-// a later row wins), through TerminalCellForSize. A missing or unreadable
-// file is the boot look (8x16). Read it per WIN_RESIZE: the kernel
+// a later row wins), through the applies-nothing mirror in
+// TerminalCellForSettings. A missing or unreadable file keeps the rung in
+// force exactly like an absent row. Read it per WIN_RESIZE: the kernel
 // publishes the new row before it pushes the event (settings.set's
 // font_size branch), so this read always answers with the rung the
 // kernel's own reflow just used.
@@ -37,23 +41,52 @@ func TerminalCell() (w, h uint32) {
 }
 
 // TerminalCellForSettings maps a SETTINGS.TXT body's `font_size` row to
-// the grid cell (last row wins; absent = the boot look).
+// the grid cell (last row wins — kernel set_internal semantics), and
+// mirrors the kernel contract exactly: apply_font_size on an absent or
+// unrecognized value applies NOTHING (both ladders keep what they had,
+// settings.zig), so the derivation must not move either — it keeps the
+// last VALID cell (the boot look, 8x16, before the first valid row).
+// Without that, a stored garbage row sent the app back to 8x16 against a
+// grid still at 10x21 until the next valid set (M80i #1791 review
+// footnote 1). The state is per-process and tracks the rows this app has
+// SEEN: the kernel publishes a valid row before every zoom's WIN_RESIZE
+// (settings.set's font_size branch), so the only changes this cannot
+// track are ones that land before the app's first read.
 func TerminalCellForSettings(body []byte) (w, h uint32) {
-	return TerminalCellForSize(settingValue(string(body), "font_size"))
+	if w, h, ok := cellForRung(settingValue(string(body), "font_size")); ok {
+		lastValidW, lastValidH = w, h
+	}
+	return lastValidW, lastValidH
+}
+
+// lastValidW/H is the rung in force as this app last derived it (the boot
+// look before the first valid row). One writer: TerminalCellForSettings.
+var lastValidW, lastValidH uint32 = 8, 16
+
+// cellForRung is the pure vocabulary table: the kernel's apply_font_size
+// names and aliases onto font_metrics' three rungs. ok=false is exactly
+// the set apply_font_size maps to null (applies nothing).
+func cellForRung(val string) (w, h uint32, ok bool) {
+	switch val {
+	case "small", "0", "8x8":
+		return 7, 13, true
+	case "medium", "1", "16x16":
+		return 8, 16, true
+	case "large", "2", "24x24":
+		return 10, 21, true
+	}
+	return 0, 0, false
 }
 
 // TerminalCellForSize maps one stored `font_size` value to the grid cell
 // — the kernel's apply_font_size vocabulary (the M20 names and their
-// numeric/size aliases) onto font_metrics' three rungs. Anything else,
-// including "" for an ABSENT key, keeps the boot look (8x16).
+// numeric/size aliases) onto font_metrics' three rungs, pure and
+// stateless. Anything else, including "" for an ABSENT key, reports the
+// boot look (8x16). Apps that want the applies-nothing mirror (the rung
+// IN FORCE) call TerminalCellForSettings/TerminalCell instead.
 func TerminalCellForSize(val string) (w, h uint32) {
-	switch val {
-	case "small", "0", "8x8":
-		return 7, 13
-	case "medium", "1", "16x16":
-		return 8, 16
-	case "large", "2", "24x24":
-		return 10, 21
+	if w, h, ok := cellForRung(val); ok {
+		return w, h
 	}
 	return 8, 16
 }
