@@ -203,6 +203,11 @@ func applyRPC(req vi.WmRpc) bool {
 			vi.ConsoleLine(MarkerHostView + vi.Itoa64(int64(id)))
 		}
 		vi.ConsoleLine(MarkerRpcDeclare + vi.Itoa64(int64(id)))
+		// M79g (#1718): an app that joined the strip is part of the
+		// session. This is the arm a launcher exec reaches (Ctrl+Space ->
+		// execSelected has no marker-gated write site of its own), so the
+		// RPC — not the launcher — owns the write.
+		noteSessionMutation()
 		return true
 	case vi.WmRpcKindRaise: // 1
 		if vi.WmctlTaskbarClick(id) == 0 {
@@ -217,6 +222,7 @@ func applyRPC(req vi.WmRpc) bool {
 			noteStripOpen()
 			dogfoodHosted = true
 			vi.ConsoleLine(MarkerTabOpen + vi.Itoa64(int64(id)))
+			noteSessionMutation() // M79g (#1718): a new tab persists
 		}
 		// Same host-state sync as declare: an attach-without-declare client
 		// still lands on the strip with focus and the single-tab close budget.
@@ -226,9 +232,15 @@ func applyRPC(req vi.WmRpc) bool {
 		vi.ConsoleLine(MarkerRpcAttach + vi.Itoa64(int64(id)))
 		return true
 	case vi.WmRpcKindDetachTab: // 6
-		_ = tabs.CloseTab(id)
+		closed := tabs.CloseTab(id)
 		syncHostedFromStrip()
 		vi.ConsoleLine(MarkerRpcDetach + vi.Itoa64(int64(id)))
+		if closed {
+			// M79g (#1718): the tab really left the strip, so the file
+			// must say so. An unknown id changed nothing and is not a
+			// write.
+			noteSessionMutation()
+		}
 		return true
 	case vi.WmRpcKindCycleTab: // 7
 		if nid, ok := tabs.NextID(); ok {
@@ -272,6 +284,10 @@ func applyRPC(req vi.WmRpc) bool {
 		// The strip is the rail's render model; the next composite tick paints
 		// the new label. The marker follows the successful state mutation.
 		vi.ConsoleLine(MarkerTitle + vi.Itoa64(int64(id)) + " " + title)
+		// M79g (#1718): a title the app set is the title the session
+		// restores. Bin is untouched — SetTitle never re-guesses it, so
+		// reopen identity survives a rename.
+		noteSessionMutation()
 		return true
 	default:
 		vi.ConsoleLine(MarkerRpcOther + vi.Itoa64(int64(req.Kind&0x7f)))
@@ -343,8 +359,17 @@ func closeTabByID(id uint32) bool {
 	}
 	vi.ConsoleLine(MarkerHostClose + vi.Itoa64(int64(id)))
 	vi.ConsoleLine(MarkerTabClose + vi.Itoa64(int64(id)))
-	_ = tabs.CloseTab(id)
+	closed := tabs.CloseTab(id)
 	syncHostedFromStrip()
+	if closed {
+		// M79g (#1718): every close lands on this seam (choreography,
+		// close-x, exit sweep), so one hook here covers them all — a
+		// closed tab must not be on the next boot's strip. Closing the
+		// LAST tab leaves an empty strip, which writeSession refuses:
+		// the file keeps the previous contents rather than publishing an
+		// empty session.
+		noteSessionMutation()
+	}
 	if nid, ok := tabs.Focused(); ok {
 		// Closing one side of a split leaves a single tab: restore
 		// full-viewport (Unsplit already ran in the two-tab choreography;
