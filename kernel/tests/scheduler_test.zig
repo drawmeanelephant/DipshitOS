@@ -26,6 +26,8 @@ const fault_current = scheduler.fault_current;
 const frame_bytes = scheduler.frame_bytes;
 const has_free_slot = scheduler.has_free_slot;
 const idle_entry = scheduler.idle_entry;
+const idle_pass = scheduler.idle_pass;
+const on_idle_pass = &scheduler.on_idle_pass;
 const idle_id = scheduler.idle_id;
 const init = scheduler.init;
 const is_blocked = scheduler.is_blocked;
@@ -671,6 +673,52 @@ test "scheduler: lifecycle — spawn, exit to zombie, idle reaps back to free" {
     var con = mock.console();
     maybe_report(&con);
     try std.testing.expectEqualStrings("tasks user-el0 exited status=7\nprocs user-el0 exited status=7\ntasks user-el0 reaped\n", mock.contents());
+}
+
+// Claim 1747: `idle_pass` is the console-free drain seam that took the
+// custom-virtio queue-3 pump off the shell idle loop. Two properties the
+// fix rests on, both host-observable without booting a VM:
+//   1. a registrant is reached exactly once per pass, so input liveness no
+//      longer depends on the shell idle loop running; and
+//   2. the lifecycle reap still happens in the SAME pass, so inserting the
+//      hook did not cost the reaper a beat.
+var idle_hook_calls: usize = 0;
+
+fn counting_idle_hook() void {
+    idle_hook_calls += 1;
+}
+
+test "scheduler: the idle pass runs the console-free hook and still reaps" {
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+
+    // No registrant: the pass is still safe and still reaps.
+    on_idle_pass.* = null;
+    idle_hook_calls = 0;
+    idle_pass();
+    try std.testing.expectEqual(@as(usize, 0), idle_hook_calls);
+
+    // With a registrant, every pass reaches it exactly once.
+    on_idle_pass.* = counting_idle_hook;
+    defer on_idle_pass.* = null;
+    idle_pass();
+    try std.testing.expectEqual(@as(usize, 1), idle_hook_calls);
+    idle_pass();
+    try std.testing.expectEqual(@as(usize, 2), idle_hook_calls);
+
+    // The reap half is unchanged: drive the user to a zombie, then confirm
+    // ONE pass both ran the hook and freed the slot.
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    try std.testing.expect(exit_current(7)); // user -> idle
+    try std.testing.expectEqual(@as(usize, 1), stats().zombies);
+    const before = idle_hook_calls;
+    idle_pass();
+    try std.testing.expectEqual(before + 1, idle_hook_calls); // hook ran
+    try std.testing.expectEqual(@as(usize, 0), stats().zombies); // and reaped
 }
 
 test "scheduler: two exits in one window report BOTH lines in order" {
