@@ -3727,6 +3727,8 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
     case "alt-shift-tab": return (0x30, [.option, .shift], "\t")
     case "ctrl-tab": return (0x30, [.control], "\t") // M63r #1424
     case "ctrl-shift-tab": return (0x30, [.control, .shift], "\t")
+    // M80k (#1727): the terminal's full-RIS chord (macOS path; 'r' = 0x0F).
+    case "ctrl-shift-alt-r": return (0x0F, [.control, .shift, .option], "r")
     case "up": return (0x7E, [], "\u{F700}")
     case "down": return (0x7D, [], "\u{F701}")
     case "left": return (0x7B, [], "\u{F702}")
@@ -5772,6 +5774,12 @@ enum CustomVirtioSpike {
         // stream carries raw HID usages, so WND.BIN matches 0x45 for the
         // overview chord.
         case "ctrl-f12": return (hidModCtrl, 0x45)
+        // M80k (#1727): the terminal's full-RIS chord. A THIRD modifier
+        // is not expressible in the ctrl-/ctrl-shift- letter patterns
+        // (they are letters only), so the triple-modifier chord is named
+        // outright — usage 0x15 = 'r', the same key as ctrl-shift-r's
+        // soft reset, so the guest can tell them apart by the alt bit.
+        case "ctrl-shift-alt-r": return (hidModCtrl | hidModShift | hidModAlt, 0x15)
         default: break
         }
         if token.hasPrefix("ctrl-shift-"), token.count == 12 {

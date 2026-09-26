@@ -147,6 +147,27 @@ pub fn armed() bool {
 // HID-usage → ASCII keymap (pure — host-testable)
 // ---------------------------------------------------------------------------
 
+/// M80k (#1727): the terminal hygiene chords. `ctrl-shift-K` clears the
+/// scrollback (the ED 3 the user could not type), `ctrl-shift-R` is the
+/// soft reset (styles and modes, grid intact) and `ctrl-shift-alt-R` the
+/// full RIS. Split out as a pure classifier so the chord table is
+/// pinnable without a window: the dispatch site stays a switch, and the
+/// "alt is the RIS, not the soft reset" rule is testable rather than
+/// eyeballed. Everything else is no chord.
+pub const HygieneChord = enum { clear_scrollback, soft_reset, ris };
+
+/// The chord for one key-DOWN edge, or null when this is not a hygiene
+/// chord. The modifiers are the same booleans the chrome table tests, so
+/// the two can never disagree about what a chord is.
+pub fn hygieneChord(usage: u8, shift: bool, alt: bool, ctrl: bool) ?HygieneChord {
+    if (!ctrl or !shift) return null;
+    return switch (usage) {
+        0x0e => .clear_scrollback, // 'k'
+        0x15 => if (alt) .ris else .soft_reset, // 'r'
+        else => null,
+    };
+}
+
 /// Map a HID keyboard boot-protocol usage ID to an ASCII byte, applying
 /// shift when set. Returns null for usages outside the usable subset (the
 /// card's honest bound: no invented bytes).
@@ -655,6 +676,54 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 // (pinned class-A); the chord is still consumed there.
                 if (ctrl and shift and k == 0x09) {
                     if (scr) |s| _ = s.searchOpen();
+                    events += 1;
+                    continue;
+                }
+                // M80k (#1727): the hygiene chords every terminal has and
+                // this one did not — clear the scrollback, soft reset, full
+                // reset. The cure for a grid wedged by an app that died
+                // mid-escape, without closing the tab. Same chrome-chord
+                // family (consumed here, before the tty queue, and never
+                // injected as bytes), and the operations are the M80b /
+                // M80e seams themselves rather than a second
+                // implementation that could drift. Must sit ABOVE the
+                // search-capture block below: a wedged grid is exactly
+                // when the scan bar is most likely to be up, and a chord
+                // swallowed as a search pattern is no cure at all.
+                if (hygieneChord(k, shift, alt, ctrl)) |hyg| {
+                    if (scr) |s| {
+                        switch (hyg) {
+                            .clear_scrollback => {
+                                const before = s.historyCount();
+                                s.clearScrollback();
+                                // Snap to the tail even when the clear
+                                // itself was a no-op (the alternate
+                                // screen's ring belongs to the primary
+                                // grid): "scroll to tail" is half the
+                                // promise, and it is unconditional.
+                                s.scrollReset();
+                                var cmsg: [40]u8 = undefined;
+                                const cm = std.fmt.bufPrint(&cmsg, "tty: clear {d} lines\n", .{before - s.historyCount()}) catch "tty: clear\n";
+                                klog.line(cm);
+                            },
+                            .soft_reset => {
+                                // The scan bar is presentation, not parser
+                                // state: leave it up and the "grid intact"
+                                // reset is invisible behind the overlay.
+                                s.searchExit();
+                                s.softReset();
+                                klog.line("tty: reset soft\n");
+                            },
+                            .ris => {
+                                // RIS wipes the grid itself, overlay and all
+                                // — no searchExit needed (and none wanted:
+                                // restoring a covered row into a grid that
+                                // no longer exists would resurrect bytes).
+                                s.hardReset();
+                                klog.line("tty: reset full\n");
+                            },
+                        }
+                    }
                     events += 1;
                     continue;
                 }
@@ -1358,5 +1427,99 @@ test "input: a window-bound terminal receives encoded keys, not app events (#108
     _ = driving_award.user_close(win_id);
     try std.testing.expect(!tt.isAttached());
     try std.testing.expect(terminal.windowTerminal(win_id) == null);
+    for (&terminal.terminals) |*t2| t2.reset();
+}
+
+test "input: the M80k hygiene chords are exactly ctrl-shift-K, ctrl-shift-R and ctrl-shift-alt-R (#1727)" {
+    // The chord TABLE, pinned without a window: a third modifier on 'r'
+    // is the difference between a soft reset and a full RIS, so it has to
+    // be a table fact rather than an if-ordering accident.
+    try std.testing.expectEqual(HygieneChord.clear_scrollback, hygieneChord(0x0e, true, false, true).?);
+    try std.testing.expectEqual(HygieneChord.soft_reset, hygieneChord(0x15, true, false, true).?);
+    try std.testing.expectEqual(HygieneChord.ris, hygieneChord(0x15, true, true, true).?);
+    // Alt alone must not buy a RIS: without ctrl+shift there is no chord.
+    try std.testing.expect(hygieneChord(0x15, false, true, true) == null);
+    try std.testing.expect(hygieneChord(0x15, true, false, false) == null);
+    try std.testing.expect(hygieneChord(0x15, false, false, true) == null);
+    try std.testing.expect(hygieneChord(0x15, true, true, false) == null);
+    // Not letters: no accidental capture of the existing chrome chords
+    // (ctrl-shift-C/V/F) or of a bare keystroke.
+    try std.testing.expect(hygieneChord(0x06, true, false, true) == null);
+    try std.testing.expect(hygieneChord(0x19, true, false, true) == null);
+    try std.testing.expect(hygieneChord(0x09, true, false, true) == null);
+    try std.testing.expect(hygieneChord(0x0e, false, false, false) == null);
+    try std.testing.expect(hygieneChord(0x2c, false, false, false) == null); // Space
+}
+
+test "input: a hygiene chord is consumed before the tty queue — the app never sees the bytes (#1727)" {
+    // The chord is a kernel presentation act, not typed input: whatever
+    // the bound tty would have received for ctrl-shift-K (0x0b, the
+    // kill-line control) must never reach it, and the app event queue
+    // must stay empty exactly as a plain key does.
+    app_events.init();
+    driving_award.arm();
+    for (&terminal.terminals) |*tt| tt.reset();
+    const res = driving_award.user_open(10, 10, 100, 100, 2);
+    try std.testing.expect(res == .opened);
+    const win_id = res.opened;
+    _ = app_events.pop(2); // Consume WIN_FOCUS
+    const th = terminal.create(2) orelse return error.TestUnexpectedResult;
+    const tt = terminal.get(th).?;
+    try std.testing.expect(tt.attachWindow(win_id));
+    const scr = terminal.screenForWindow(win_id).?;
+    var b: [8]u8 = undefined;
+
+    fifo_count = 0;
+    fifo_head = 0;
+    kb_held = [_]u8{0} ** 6;
+
+    // Real scrollback first: 160 lines over the 128-row grid pushes rows
+    // into the ring, so the clear chord has something to actually drop.
+    var line_buf: [4 * 160]u8 = undefined;
+    var w: usize = 0;
+    for (0..160) |_| {
+        @memcpy(line_buf[w..][0..4], "row\n");
+        w += 4;
+    }
+    scr.feed(line_buf[0..w]);
+    const before = scr.historyCount();
+    const used_before = scr.used;
+    try std.testing.expect(before > 0);
+    try std.testing.expect(scr.lineCount() > scr.used); // grid+history is one space
+
+    // ctrl-shift-k: LCTRL(0x01) + LSHIFT(0x02) + 'k' (usage 0x0e). The
+    // ED 3 semantics: the ring goes, the live grid stays.
+    decode_keyboard_report(&[_]u8{ 0x03, 0, 0x0e, 0, 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(usize, 0), tt.readInput(&b));
+    try std.testing.expectEqual(@as(usize, 0), app_events.pending(2));
+    try std.testing.expectEqual(@as(usize, 0), fifo_count);
+    try std.testing.expectEqual(@as(usize, 0), scr.historyCount());
+    try std.testing.expectEqual(@as(usize, 0), scr.viewOffset());
+    // The grid survives the clear (that is ED 3, not ED 2): the used row
+    // count is untouched and the last written line is still its own text.
+    try std.testing.expectEqual(used_before, scr.used);
+    try std.testing.expectEqual(used_before, scr.lineCount());
+    try std.testing.expect(std.mem.indexOf(u8, scr.line(used_before - 2), "row") != null);
+
+    // ctrl-shift-r: LCTRL + LSHIFT + 'r' (usage 0x15) — no alt, so the
+    // soft reset: no bytes, and the cursor stays where it was.
+    const cur = scr.cursorLine();
+    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }); // release
+    decode_keyboard_report(&[_]u8{ 0x03, 0, 0x15, 0, 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(usize, 0), tt.readInput(&b));
+    try std.testing.expectEqual(@as(usize, 0), app_events.pending(2));
+    try std.testing.expectEqual(cur, scr.cursorLine());
+
+    // ctrl-shift-alt-r: the full RIS. Still no bytes, still no app event,
+    // and the grid itself is blanked.
+    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }); // release
+    decode_keyboard_report(&[_]u8{ 0x07, 0, 0x15, 0, 0, 0, 0, 0 }); // ctrl+shift+alt
+    try std.testing.expectEqual(@as(usize, 0), tt.readInput(&b));
+    try std.testing.expectEqual(@as(usize, 0), app_events.pending(2));
+    try std.testing.expectEqual(@as(usize, 0), scr.historyCount());
+    try std.testing.expectEqual(@as(usize, 0), scr.lineCount() - 1);
+    try std.testing.expect(std.mem.indexOf(u8, scr.line(0), "row") == null);
+
+    _ = driving_award.user_close(win_id);
     for (&terminal.terminals) |*t2| t2.reset();
 }

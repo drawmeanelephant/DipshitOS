@@ -723,6 +723,24 @@ fn topic_body(name: []const u8) ?[]const u8 {
             "  `settings` (theme, prompt, font, scrollback), `shutdown`, `reboot`,\n" ++
             "  `dmesg`, `time`, and crash tombstone viewing with `crash`.\n";
     }
+    if (std.mem.eql(u8, name, "terminal")) {
+        // M80k (#1727): the hygiene chords. They are kernel chrome, not
+        // app behaviour — intercepted in input.zig before the tty queue,
+        // so they work for ANY tty-bound window and never reach the app as
+        // bytes. The clear/reset operations are the ED 3 / DECSTR / RIS
+        // seams the parser itself uses, not a second implementation.
+        return "terminal\n" ++
+            "  A tty-bound window (GOTERM.ELF, GOSH) paints a grid with scrollback.\n" ++
+            "  Chrome chords — consumed by the kernel, never typed into the app:\n" ++
+            "    Ctrl+Shift+C / V      copy the selection / paste the clipboard\n" ++
+            "    Ctrl+Shift+F           open the search bar (Esc closes it)\n" ++
+            "    Ctrl+Shift+K           clear the scrollback (ED 3), snap to the tail\n" ++
+            "    Ctrl+Shift+R           soft reset: styles and modes, grid intact\n" ++
+            "    Ctrl+Shift+Alt+R       full reset (RIS): the grid goes too\n" ++
+            "  Scrolling the view: PageUp/PageDown, Shift+Up/Down, Shift+Home/End.\n" ++
+            "  The cure for a grid wedged by an app that died mid-escape: the two\n" ++
+            "  reset chords, or just close the tab.\n";
+    }
     if (std.mem.eql(u8, name, "shortcuts")) {
         return "shortcuts\n" ++
             "  Global: Ctrl+Shift+A (About), Ctrl+Shift+/ (Shortcuts), Alt+Tab (Switch window),\n" ++
@@ -6759,6 +6777,13 @@ fn cmd_shortcuts(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_line("    Ctrl+C         Interrupt current command");
     m.console.print_line("    Up / Down      Navigate command history");
     m.console.print_line("    Ctrl+R         Reverse search command history");
+    m.console.print_line("  Terminal Window:");
+    m.console.print_line("    Ctrl+Shift+C   Copy the selected text to clipboard");
+    m.console.print_line("    Ctrl+Shift+V   Paste clipboard into the terminal");
+    m.console.print_line("    Ctrl+Shift+F   Search the scrollback");
+    m.console.print_line("    Ctrl+Shift+K   Clear the scrollback (see 'help terminal')");
+    m.console.print_line("    Ctrl+Shift+R   Soft reset the terminal");
+    m.console.print_line("    Ctrl+Shift+Alt+R  Full reset (RIS)");
     return .none;
 }
 
